@@ -8,12 +8,12 @@ body{display:flex;align-items:center;justify-content:center;padding:16px}.app{wi
 </style></head><body><main class="app">
 <header class="top"><div class="brand">S N A K E&nbsp; / &nbsp;19 × 19</div><select id="mode" aria-label="Game mode"><option value="multi" selected>Multiplayer</option><option value="single">Single game</option></select></header>
 <section class="scores"><div class="score p1"><small id="label1">PLAYER 1 · YOU</small><strong id="score1">0</strong></div><div class="score p2"><small id="label2">PLAYER 2 · WAITING</small><strong id="score2">0</strong></div></section>
-<div class="board-wrap" id="boardWrap"><canvas id="game" width="760" height="760"></canvas><div class="overlay" id="overlay"><div class="message"><h2 id="ovTitle">Connecting to the room…</h2><p id="ovText">Opening the fixed online room. Keep this page open.</p></div></div></div>
-<footer class="bottom"><div class="status"><span class="dot wait" id="dot"></span><span id="status">Connecting…</span></div><div class="hint">WASD / ARROWS · SWIPE</div></footer><div class="foot">ONE ROOM · SHARED BOARD · LIVE PLAY</div>
+<div class="board-wrap" id="boardWrap"><canvas id="game" width="760" height="760"></canvas><div class="overlay" id="overlay"><div class="message"><h2 id="ovTitle">Connecting to the room…</h2><p id="ovText">Finding an available online room. Keep this page open.</p></div></div></div>
+<footer class="bottom"><div class="status"><span class="dot wait" id="dot"></span><span id="status">Connecting…</span></div><div class="hint">WASD / ARROWS · SWIPE</div></footer><div class="foot">AUTO-MATCH ROOMS · 2 PLAYERS PER ROOM · LIVE PLAY</div>
 </main><script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script><script>
 (()=>{
 const N=19, CELL=40, canvas=document.getElementById('game'),ctx=canvas.getContext('2d'),modeEl=document.getElementById('mode'),overlay=document.getElementById('overlay'),ovTitle=document.getElementById('ovTitle'),ovText=document.getElementById('ovText'),statusEl=document.getElementById('status'),dot=document.getElementById('dot'),s1=document.getElementById('score1'),s2=document.getElementById('score2'),l1=document.getElementById('label1'),l2=document.getElementById('label2');
-const ROOM='snake-19x19-fixed-room-v1';let role=0,peer,conn,connected=false,isHost=false,roomState=null,localMode='multi',lastDraw=0,raf=0,localSingle=null,respawnTimers={},lastDir={1:'R',2:'L'};
+const ROOM_PREFIX='snake19-auto-room-';let role=0,peer,conn,connected=false,isHost=false,roomState=null,localMode='multi',lastDraw=0,raf=0,localSingle=null,respawnTimers={},lastDir={1:'R',2:'L'},roomIndex=0,roomAttempt=0;
 const dirs={U:[0,-1],D:[0,1],L:[-1,0],R:[1,0]},opposite={U:'D',D:'U',L:'R',R:'L'};
 function snake(x,y,d){return {body:Array.from({length:5},(_,i)=>[x-dirs[d][0]*i,y-dirs[d][1]*i]),dir:d,next:d,score:0,alive:true,respawnAt:0}}
 function randFood(snakes){let free=[];for(let y=0;y<N;y++)for(let x=0;x<N;x++)if(!snakes.some(s=>s.body.some(b=>b[0]===x&&b[1]===y)))free.push([x,y]);return free.length?free[Math.floor(Math.random()*free.length)]:[9,9]}
@@ -24,15 +24,39 @@ function show(title,text){overlay.classList.remove('hidden');ovTitle.textContent
 function hide(){overlay.classList.add('hidden')}
 function send(msg){if(conn&&conn.open)conn.send(msg)}
 function broadcast(){if(conn&&conn.open)conn.send({type:'state',state:roomState})}
-function startPeer(){if(!window.Peer){show('Connection unavailable','PeerJS could not load. Check your internet connection and refresh.');setStatus('Offline');return}
-  peer=new Peer(ROOM,{debug:0});
-  peer.on('open',()=>{isHost=true;role=1;roomState=newState();setStatus('Room open · you are Player 1',true);show('Waiting for Player 2','Share this GitHub Pages URL. The second player joins this fixed room.');startLoop()});
-  peer.on('connection',c=>{if(conn&&conn.open){c.on('open',()=>c.send({type:'full'}));return}acceptConnection(c)});
-  peer.on('error',err=>{if(err.type==='unavailable-id'){peer.destroy();joinRoom()}else{console.warn(err);setStatus('Connection issue');show('Connection issue','Could not establish the room. Refresh the page to retry.')}});
+function startPeer(){if(!window.Peer){show('Connection unavailable','PeerJS could not load. Check your internet connection and refresh.');setStatus('Offline');return}claimRoom(0)}
+function roomId(index){return ROOM_PREFIX+index}
+function claimRoom(index){
+  roomIndex=index;roomAttempt=index;isHost=false;connected=false;conn=null;
+  setStatus('Finding an automatic room…');
+  peer=new Peer(roomId(index),{debug:0});
+  peer.on('open',()=>{
+    isHost=true;role=1;roomState=newState();
+    setStatus('Room '+(index+1)+' · Player 1',true);
+    show('Room '+(index+1)+' created','Waiting for one player. Another player will be assigned here automatically.');
+    startLoop();
+  });
+  peer.on('connection',c=>{if(conn){c.on('open',()=>c.send({type:'full'}));return}acceptConnection(c)});
+  peer.on('error',err=>{if(err.type==='unavailable-id'){peer.destroy();joinRoom(index)}else{console.warn(err);setTimeout(()=>claimRoom(index+1),500)}});
 }
-function joinRoom(){isHost=false;peer=new Peer();peer.on('open',()=>{role=2;setStatus('Joining room…');conn=peer.connect(ROOM,{reliable:true});conn.on('open',()=>{connected=true;setStatus('Connected · Player 2',true);send({type:'join'});hide();startLoop()});conn.on('data',handleData);conn.on('close',disconnected)});peer.on('error',e=>{console.warn(e);setStatus('Waiting for room');show('Room not found yet','Player 1 must open the game first. Refresh after they have loaded it.')})}
-function acceptConnection(c){conn=c;conn.on('open',()=>{connected=true;setStatus('Connected · Player 1',true);hide();c.send({type:'state',state:roomState});startLoop()});conn.on('data',handleData);conn.on('close',disconnected)}
-function disconnected(){connected=false;conn=null;setStatus('Opponent disconnected');show('Opponent disconnected','The shared game paused. Refresh both pages to start a new room.');}
+function joinRoom(index){
+  roomIndex=index;isHost=false;peer=new Peer({debug:0});
+  peer.on('open',()=>{
+    role=2;setStatus('Joining room '+(index+1)+'…');
+    conn=peer.connect(roomId(index),{reliable:true});
+    conn.on('open',()=>{connected=true;setStatus('Room '+(index+1)+' · Player 2',true);send({type:'join'});hide();startLoop()});
+    conn.on('data',msg=>{if(msg&&msg.type==='full'){setStatus('Room full · finding another');conn.close();peer.destroy();claimRoom(index+1);return}handleData(msg)});
+    conn.on('close',()=>{if(connected)disconnected()});
+    conn.on('error',()=>{peer.destroy();claimRoom(index+1)});
+  });
+  peer.on('error',e=>{console.warn(e);setTimeout(()=>claimRoom(index+1),500)});
+}
+function acceptConnection(c){
+  conn=c;
+  conn.on('open',()=>{connected=true;setStatus('Room '+(roomIndex+1)+' · Player 1',true);hide();c.send({type:'state',state:roomState});startLoop()});
+  conn.on('data',handleData);conn.on('close',disconnected);
+}
+function disconnected(){connected=false;conn=null;setStatus('Opponent disconnected');show('Opponent disconnected','This room is now waiting for another player. Keep this page open; a new player can join automatically.');}
 function handleData(msg){if(!msg)return;if(isHost){if(msg.type==='input'){changeDir(2,msg.dir)}else if(msg.type==='join'){broadcast()}}else{if(msg.type==='state'){roomState=msg.state;hide();renderScores()}else if(msg.type==='full'){setStatus('Room is full')}}}
 function changeDir(id,d){let s=roomState?.players[id];if(!s||!s.alive||!dirs[d]||opposite[s.dir]===d)return;s.next=d}
 function input(d){if(localMode==='single'){if(localSingle)changeDir(1,d);return}if(role===1&&isHost&&roomState)changeDir(1,d);else if(role===2)send({type:'input',dir:d})}
