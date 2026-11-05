@@ -1,65 +1,1338 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>Snake — Multiplayer</title>
-<style>
-:root{color-scheme:dark;--bg:#090a0a;--fg:#e9eee9;--muted:#7d8780;--line:#252b27;--green:#b8f28b;--blue:#8bd8f2}
-*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--fg);font:14px ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;touch-action:none;overscroll-behavior:none}
-body{display:flex;align-items:center;justify-content:center;padding:16px}.app{width:min(94vw,660px);display:flex;flex-direction:column;gap:14px}.top{display:flex;align-items:center;justify-content:space-between;gap:12px}.brand{font-size:12px;letter-spacing:.18em;color:var(--muted)}select,button{font:inherit;color:var(--fg);background:#111512;border:1px solid var(--line);border-radius:7px;padding:9px 11px;outline:none}select{max-width:180px}.scores{display:grid;grid-template-columns:1fr 1fr;gap:8px}.score{border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:#0d100e}.score small{display:block;color:var(--muted);font-size:10px;letter-spacing:.1em;margin-bottom:5px}.score strong{font-size:20px;font-weight:500}.score.p1 strong{color:var(--green)}.score.p2 strong{color:var(--blue)}.board-wrap{position:relative;width:100%;aspect-ratio:1;border:1px solid #303832;border-radius:10px;overflow:hidden;background:#0b0d0b;box-shadow:0 18px 60px #0008}.board-wrap canvas{width:100%;height:100%;display:block}.overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#080a09b8;text-align:center;padding:24px;pointer-events:none}.overlay.hidden{display:none}.overlay .message{max-width:300px}.overlay h2{font-size:18px;font-weight:500;margin:0 0 9px}.overlay p{color:var(--muted);line-height:1.6;margin:0}.bottom{display:flex;align-items:center;justify-content:space-between;gap:10px;color:var(--muted);font-size:11px}.status{display:flex;align-items:center;gap:7px}.dot{width:7px;height:7px;border-radius:50%;background:#e6b86a}.dot.online{background:#8be0a0}.dot.wait{background:#e6b86a}.hint{text-align:right}.restart{pointer-events:auto;margin-top:14px}.foot{color:#515b53;font-size:10px;text-align:center;letter-spacing:.04em}
-@media(max-width:430px){body{padding:12px}.app{gap:10px}.score{padding:8px 10px}.score strong{font-size:18px}.bottom{font-size:10px}}
-</style></head><body><main class="app">
-<header class="top"><div class="brand">S N A K E&nbsp; / &nbsp;19 × 19</div><select id="mode" aria-label="Game mode"><option value="multi" selected>Multiplayer</option><option value="single">Single game</option></select></header>
-<section class="scores"><div class="score p1"><small id="label1">PLAYER 1 · YOU</small><strong id="score1">0</strong></div><div class="score p2"><small id="label2">PLAYER 2 · WAITING</small><strong id="score2">0</strong></div></section>
-<div class="board-wrap" id="boardWrap"><canvas id="game" width="760" height="760"></canvas><div class="overlay" id="overlay"><div class="message"><h2 id="ovTitle">Connecting to the room…</h2><p id="ovText">Opening the fixed online room. Keep this page open.</p></div></div></div>
-<footer class="bottom"><div class="status"><span class="dot wait" id="dot"></span><span id="status">Connecting…</span></div><div class="hint">WASD / ARROWS · SWIPE</div></footer><div class="foot">ONE ROOM · SHARED BOARD · LIVE PLAY</div>
-</main><script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script><script>
-(()=>{
-const N=19, CELL=40, canvas=document.getElementById('game'),ctx=canvas.getContext('2d'),modeEl=document.getElementById('mode'),overlay=document.getElementById('overlay'),ovTitle=document.getElementById('ovTitle'),ovText=document.getElementById('ovText'),statusEl=document.getElementById('status'),dot=document.getElementById('dot'),s1=document.getElementById('score1'),s2=document.getElementById('score2'),l1=document.getElementById('label1'),l2=document.getElementById('label2');
-const ROOM='snake-19x19-fixed-room-v1';let role=0,peer,conn,connected=false,isHost=false,roomState=null,localMode='multi',lastDraw=0,raf=0,localSingle=null,respawnTimers={},lastDir={1:'R',2:'L'};
-const dirs={U:[0,-1],D:[0,1],L:[-1,0],R:[1,0]},opposite={U:'D',D:'U',L:'R',R:'L'};
-function snake(x,y,d){return {body:Array.from({length:5},(_,i)=>[x-dirs[d][0]*i,y-dirs[d][1]*i]),dir:d,next:d,score:0,alive:true,respawnAt:0}}
-function randFood(snakes){let free=[];for(let y=0;y<N;y++)for(let x=0;x<N;x++)if(!snakes.some(s=>s.body.some(b=>b[0]===x&&b[1]===y)))free.push([x,y]);return free.length?free[Math.floor(Math.random()*free.length)]:[9,9]}
-function newState(){let a=snake(4,9,'R'),b=snake(14,9,'L');return {food:[9,4],players:{1:a,2:b},tick:0}}
-function freshSnake(id){return id===1?snake(4,9,'R'):snake(14,9,'L')}
-function setStatus(t,online=false){statusEl.textContent=t;dot.className='dot '+(online?'online':'wait')}
-function show(title,text){overlay.classList.remove('hidden');ovTitle.textContent=title;ovText.textContent=text}
-function hide(){overlay.classList.add('hidden')}
-function send(msg){if(conn&&conn.open)conn.send(msg)}
-function broadcast(){if(conn&&conn.open)conn.send({type:'state',state:roomState})}
-function startPeer(){if(!window.Peer){show('Connection unavailable','PeerJS could not load. Check your internet connection and refresh.');setStatus('Offline');return}
-  peer=new Peer(ROOM,{debug:0});
-  peer.on('open',()=>{isHost=true;role=1;roomState=newState();setStatus('Room open · you are Player 1',true);show('Waiting for Player 2','Share this GitHub Pages URL. The second player joins this fixed room.');startLoop()});
-  peer.on('connection',c=>{if(conn&&conn.open){c.on('open',()=>c.send({type:'full'}));return}acceptConnection(c)});
-  peer.on('error',err=>{if(err.type==='unavailable-id'){peer.destroy();joinRoom()}else{console.warn(err);setStatus('Connection issue');show('Connection issue','Could not establish the room. Refresh the page to retry.')}});
-}
-function joinRoom(){isHost=false;peer=new Peer();peer.on('open',()=>{role=2;setStatus('Joining room…');conn=peer.connect(ROOM,{reliable:true});conn.on('open',()=>{connected=true;setStatus('Connected · Player 2',true);send({type:'join'});hide();startLoop()});conn.on('data',handleData);conn.on('close',disconnected)});peer.on('error',e=>{console.warn(e);setStatus('Waiting for room');show('Room not found yet','Player 1 must open the game first. Refresh after they have loaded it.')})}
-function acceptConnection(c){conn=c;conn.on('open',()=>{connected=true;setStatus('Connected · Player 1',true);hide();c.send({type:'state',state:roomState});startLoop()});conn.on('data',handleData);conn.on('close',disconnected)}
-function disconnected(){connected=false;conn=null;setStatus('Opponent disconnected');show('Opponent disconnected','The shared game paused. Refresh both pages to start a new room.');}
-function handleData(msg){if(!msg)return;if(isHost){if(msg.type==='input'){changeDir(2,msg.dir)}else if(msg.type==='join'){broadcast()}}else{if(msg.type==='state'){roomState=msg.state;hide();renderScores()}else if(msg.type==='full'){setStatus('Room is full')}}}
-function changeDir(id,d){let s=roomState?.players[id];if(!s||!s.alive||!dirs[d]||opposite[s.dir]===d)return;s.next=d}
-function input(d){if(localMode==='single'){if(localSingle)changeDir(1,d);return}if(role===1&&isHost&&roomState)changeDir(1,d);else if(role===2)send({type:'input',dir:d})}
-function die(id){let s=roomState.players[id];s.alive=false;s.body=[];s.respawnAt=Date.now()+1000;s.score=s.score;}
-function step(){if(!roomState)return;roomState.tick++;
- for(let id of [1,2]){let s=roomState.players[id];if(!s.alive){if(Date.now()>=s.respawnAt){let ns=freshSnake(id);ns.score=s.score;roomState.players[id]=ns}continue}
-  s.dir=s.next;let [dx,dy]=dirs[s.dir],head=[s.body[0][0]+dx,s.body[0][1]+dy];
-  head[0]=(head[0]+N)%N;head[1]=(head[1]+N)%N;
-  let ate=head[0]===roomState.food[0]&&head[1]===roomState.food[1];
-  let own=s.body.slice(0,ate?s.body.length:s.body.length-1),other=roomState.players[id===1?2:1];
-  if(own.some(p=>p[0]===head[0]&&p[1]===head[1])||(other.alive&&other.body.some(p=>p[0]===head[0]&&p[1]===head[1]))){die(id);continue}
-  s.body.unshift(head);if(!ate)s.body.pop();else{s.score++;roomState.food=randFood([s,other])}
- }
- broadcast();renderScores();
-}
-let lastTick=0;function startLoop(){if(raf)return;lastTick=performance.now();function loop(t){raf=requestAnimationFrame(loop);if(localMode==='single'){if(t-lastTick>=135){lastTick=t;singleStep()}draw(localSingle, null, localSingle?.food);return}
- if(isHost&&connected&&t-lastTick>=135){lastTick=t;step()}draw(roomState?.players[1],roomState?.players[2],roomState?.food)}raf=requestAnimationFrame(loop)}
-function singleStart(){localSingle={...snake(9,9,'R'),food:[13,9]}}
-function singleStep(){if(!localSingle||!localSingle.alive){if(localSingle&&Date.now()>=localSingle.respawnAt){let s=snake(9,9,'R');s.score=localSingle.score;localSingle=s}return}let s=localSingle;s.dir=s.next;let [dx,dy]=dirs[s.dir],h=[s.body[0][0]+dx,s.body[0][1]+dy],ate=h[0]===s.food[0]&&h[1]===s.food[1];h[0]=(h[0]+N)%N;h[1]=(h[1]+N)%N;if(s.body.slice(0,ate?s.body.length:s.body.length-1).some(p=>p[0]===h[0]&&p[1]===h[1])){s.alive=false;s.body=[];s.respawnAt=Date.now()+1000;return}s.body.unshift(h);if(!ate)s.body.pop();else{s.score++;s.food=randFood([s])}s1.textContent=s.score;l1.textContent='YOU · SINGLE';s2.textContent='—';l2.textContent='PLAYER 2 · OFF'}
-function renderScores(){if(!roomState)return;s1.textContent=roomState.players[1].score;s2.textContent=roomState.players[2].score;l1.textContent=role===1?'PLAYER 1 · YOU':'PLAYER 1';l2.textContent=role===2?'PLAYER 2 · YOU':connected?'PLAYER 2':'PLAYER 2 · WAITING'}
-function draw(a,b,food){ctx.clearRect(0,0,760,760);ctx.fillStyle='#0b0d0b';ctx.fillRect(0,0,760,760);ctx.strokeStyle='#202520';ctx.lineWidth=1;for(let x=20;x<760;x+=40)for(let y=20;y<760;y+=40){ctx.beginPath();ctx.arc(x,y,1.2,0,Math.PI*2);ctx.fillStyle='#252c26';ctx.fill()}
- if(food){ctx.fillStyle='#f1c879';ctx.beginPath();ctx.arc(food[0]*40+20,food[1]*40+20,7,0,Math.PI*2);ctx.fill();ctx.strokeStyle='#f1c87955';ctx.beginPath();ctx.arc(food[0]*40+20,food[1]*40+20,12,0,Math.PI*2);ctx.stroke()}
- function paint(s,color){if(!s||!s.alive)return;s.body.forEach((p,i)=>{ctx.fillStyle=i===0?color:'#'+(color=== '#b8f28b'?'7da85f':'5d9fb2');let r=i===0?12:9;ctx.beginPath();ctx.roundRect(p[0]*40+20-r,p[1]*40+20-r,r*2,r*2,4);ctx.fill()})}paint(a,'#b8f28b');paint(b,'#8bd8f2');}
-modeEl.addEventListener('change',()=>{localMode=modeEl.value;if(localMode==='single'){singleStart();show('Single game','Use WASD, arrow keys or swipe.');}else{hide();if(!roomState&&isHost)roomState=newState();renderScores()}});
-window.addEventListener('keydown',e=>{let d={ArrowUp:'U',w:'U',W:'U',ArrowDown:'D',s:'D',S:'D',ArrowLeft:'L',a:'L',A:'L',ArrowRight:'R',d:'R',D:'R'}[e.key];if(d){e.preventDefault();input(d)}if(e.key===' '){e.preventDefault();if(localMode==='single')singleStart()}});
-let touch=null;canvas.addEventListener('touchstart',e=>{let t=e.changedTouches[0];touch=[t.clientX,t.clientY];},{passive:false});canvas.addEventListener('touchend',e=>{if(!touch)return;let t=e.changedTouches[0],dx=t.clientX-touch[0],dy=t.clientY-touch[1];if(Math.max(Math.abs(dx),Math.abs(dy))>18)input(Math.abs(dx)>Math.abs(dy)?(dx>0?'R':'L'):(dy>0?'D':'U'));touch=null},{passive:false});
-// PeerJS gives the fixed room a lightweight WebRTC signaling path; the host owns simulation.
-startPeer();
-})();
-</script></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#050505">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="A calm, minimalist Snake game.">
+  <title>Snake</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23050505'/%3E%3Ccircle cx='32' cy='32' r='18' fill='%23f2f2f2'/%3E%3Ccircle cx='26' cy='27' r='2.4' fill='%23050505'/%3E%3Ccircle cx='38' cy='27' r='2.4' fill='%23050505'/%3E%3C/svg%3E">
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #050505;
+      color: #f5f5f5;
+      font-synthesis: none;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      background: #050505;
+      overflow: hidden;
+      overscroll-behavior: none;
+      touch-action: none;
+    }
+
+    body {
+      position: fixed;
+      inset: 0;
+      height: 100vh;
+      height: 100dvh;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    main {
+      width: 100%;
+      height: 100%;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      touch-action: none;
+      padding:
+        max(24px, env(safe-area-inset-top))
+        max(20px, env(safe-area-inset-right))
+        max(24px, env(safe-area-inset-bottom))
+        max(20px, env(safe-area-inset-left));
+    }
+
+    .game {
+      width: min(720px, calc(100vw - 40px), calc(100svh - 156px));
+      min-width: min(270px, calc(100vw - 40px));
+      display: grid;
+      gap: clamp(20px, 3vh, 30px);
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    .topbar {
+      position: relative;
+      min-height: 53px;
+      display: grid;
+      place-items: center;
+    }
+
+    .scores {
+      display: flex;
+      justify-content: center;
+      gap: clamp(48px, 11vw, 88px);
+      min-height: 53px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .score {
+      min-width: 62px;
+      text-align: center;
+    }
+
+    .score-label {
+      display: block;
+      margin-bottom: 5px;
+      color: rgba(255, 255, 255, 0.42);
+      font-size: 0.72rem;
+      font-weight: 600;
+      letter-spacing: 0.14em;
+      line-height: 1;
+    }
+
+    .score-value {
+      display: block;
+      color: rgba(255, 255, 255, 0.96);
+      font-size: clamp(1.55rem, 4vw, 2rem);
+      font-weight: 500;
+      letter-spacing: -0.035em;
+      line-height: 1.1;
+      transform-origin: center;
+    }
+
+    .menu-button span {
+      width: 18px;
+      height: 1.5px;
+      border-radius: 2px;
+      background: rgba(255, 255, 255, 0.68);
+      transition: opacity 150ms ease, transform 150ms ease;
+    }
+
+    .menu-button:hover,
+    .menu-button[aria-expanded="true"] {
+      background: rgba(255, 255, 255, 0.055);
+    }
+
+    .menu-button:focus-visible {
+      outline: 1px solid rgba(255, 255, 255, 0.34);
+      outline-offset: 2px;
+    }
+
+    .menu-panel[hidden] {
+      display: none;
+    }
+
+    .menu-heading {
+      color: rgba(255, 255, 255, 0.34);
+      font-size: 0.7rem;
+      font-weight: 600;
+      letter-spacing: 0.11em;
+      line-height: 1;
+      text-transform: uppercase;
+    }
+
+    .menu-divider {
+      height: 1px;
+      margin: 11px 0;
+      background: rgba(255, 255, 255, 0.075);
+    }
+
+    .speed-options {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 4px;
+    }
+
+    .mode-options {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px;
+    }
+
+    .menu-option:hover {
+      color: rgba(255, 255, 255, 0.76);
+      background: rgba(255, 255, 255, 0.045);
+    }
+
+    .menu-option[aria-checked="true"] {
+      color: rgba(255, 255, 255, 0.94);
+      background: rgba(255, 255, 255, 0.105);
+    }
+
+    .menu-option:focus-visible {
+      outline: 1px solid rgba(255, 255, 255, 0.34);
+      outline-offset: 2px;
+    }
+
+    .board {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 1;
+      isolation: isolate;
+      outline: none;
+      touch-action: none;
+      cursor: default;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      opacity: 1;
+      transition: opacity 220ms ease;
+    }
+
+    .overlay {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      pointer-events: none;
+    }
+
+    .idle-hint,
+    .game-over-panel {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      text-align: center;
+      transition: opacity 180ms ease, transform 180ms ease, visibility 180ms;
+    }
+
+    .idle-hint {
+      color: rgba(255, 255, 255, 0.42);
+      font-size: clamp(0.75rem, 2vw, 0.86rem);
+      font-weight: 450;
+      letter-spacing: 0.025em;
+    }
+
+    .game-over-panel {
+      opacity: 0;
+      visibility: hidden;
+      transform: translateY(4px);
+    }
+
+    .game-over-title {
+      margin: 0 0 10px;
+      color: rgba(255, 255, 255, 0.9);
+      font-size: clamp(0.74rem, 2vw, 0.86rem);
+      font-weight: 650;
+      letter-spacing: 0.18em;
+    }
+
+    .final-score {
+      margin: 0 0 17px;
+      color: rgba(255, 255, 255, 0.82);
+      font-size: clamp(1rem, 3vw, 1.14rem);
+      font-weight: 450;
+      letter-spacing: -0.01em;
+    }
+
+    .restart-hint {
+      margin: 0;
+      color: rgba(255, 255, 255, 0.4);
+      font-size: clamp(0.72rem, 2vw, 0.82rem);
+      font-weight: 400;
+      letter-spacing: 0.015em;
+    }
+
+    .game[data-state="running"] .idle-hint,
+    .game[data-state="over"] .idle-hint {
+      opacity: 0;
+      visibility: hidden;
+      transform: translateY(-3px);
+    }
+
+    .game[data-state="over"] canvas {
+      opacity: 0.42;
+    }
+
+    .game[data-state="over"] .game-over-panel {
+      opacity: 1;
+      visibility: visible;
+      transform: translateY(0);
+    }
+
+    .network-status {
+      margin: 12px 0 0;
+      color: var(--muted, #777);
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      text-align: center;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (max-height: 520px) and (orientation: landscape) {
+      main {
+        padding-top: 14px;
+        padding-bottom: 14px;
+      }
+
+      .game {
+        width: min(70vh, calc(100vw - 40px));
+        gap: 12px;
+      }
+
+      .scores {
+        min-height: 43px;
+      }
+
+      .topbar {
+        min-height: 43px;
+      }
+
+      .score-label {
+        margin-bottom: 3px;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      canvas,
+      .idle-hint,
+      .game-over-panel {
+        transition-duration: 1ms;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="game" id="game" data-state="idle" aria-label="Snake game">
+      <div class="topbar">
+        <header class="scores" aria-label="Scores">
+          <div class="score">
+            <span class="score-label">CURRENT</span>
+            <span class="score-value" id="currentScore">0</span>
+          </div>
+          <div class="score">
+            <span class="score-label">BEST</span>
+            <span class="score-value" id="bestScore">0</span>
+          </div>
+        </header>
+        </div>
+      </div>
+
+      <div
+        class="board"
+        id="board"
+        role="application"
+        aria-label="Snake board. Use arrow keys or W A S D to move."
+        tabindex="0"
+      >
+        <canvas id="canvas" aria-hidden="true"></canvas>
+        <div class="overlay" aria-hidden="true">
+          <div class="idle-hint" id="idleHint">connecting to multiplayer</div>
+          <div class="game-over-panel">
+            <p class="game-over-title">GAME OVER</p>
+            <p class="final-score">Score <span id="finalScore">0</span></p>
+            <p class="restart-hint" id="restartHint">Press any key to restart</p>
+          </div>
+        </div>
+      </div>
+
+      <p class="sr-only" id="status" aria-live="polite"></p>
+      <p class="network-status" id="networkStatus" aria-live="polite">Connecting to multiplayer…</p>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script>
+    (() => {
+      "use strict";
+
+      // --- Configuration ----------------------------------------------------
+      const GRID_SIZE = 19;
+      const INITIAL_LENGTH = 5;
+      const BEST_SCORE_KEY = "snakeBestScore";
+      const RESTART_LOCK_MS = 2000;
+
+      const SPEED_PROFILES = Object.freeze({
+        slow:   { initial: 155, minimum: 105, step: 1.65 },
+        medium: { initial: 118, minimum: 80,  step: 1.25 },
+        fast:   { initial: 90,  minimum: 62,  step: 1.0 }
+      });
+
+      const DIRECTIONS = Object.freeze({
+        up:    { x: 0,  y: -1, name: "up" },
+        down:  { x: 0,  y: 1,  name: "down" },
+        left:  { x: -1, y: 0,  name: "left" },
+        right: { x: 1,  y: 0,  name: "right" }
+      });
+
+      const KEY_DIRECTIONS = Object.freeze({
+        ArrowUp: DIRECTIONS.up,
+        ArrowDown: DIRECTIONS.down,
+        ArrowLeft: DIRECTIONS.left,
+        ArrowRight: DIRECTIONS.right,
+        w: DIRECTIONS.up,
+        W: DIRECTIONS.up,
+        s: DIRECTIONS.down,
+        S: DIRECTIONS.down,
+        a: DIRECTIONS.left,
+        A: DIRECTIONS.left,
+        d: DIRECTIONS.right,
+        D: DIRECTIONS.right
+      });
+
+      // --- DOM and canvas ---------------------------------------------------
+      const gameElement = document.getElementById("game");
+      const boardElement = document.getElementById("board");
+      const canvas = document.getElementById("canvas");
+      const context = canvas.getContext("2d", { alpha: false });
+      const currentScoreElement = document.getElementById("currentScore");
+      const bestScoreElement = document.getElementById("bestScore");
+      const finalScoreElement = document.getElementById("finalScore");
+      const networkStatusElement = document.getElementById("networkStatus");
+      const idleHintElement = document.getElementById("idleHint");
+      const restartHintElement = document.getElementById("restartHint");
+      const statusElement = document.getElementById("status");
+      const reduceMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+      const coarsePointerQuery = window.matchMedia("(pointer: coarse)");
+
+      let canvasSize = 0;
+      let deviceScale = 1;
+      let gridGap = 0;
+      let gridOrigin = 0;
+
+      // --- Game state -------------------------------------------------------
+      let state = "idle";
+      let snake = [];
+      let previousSnake = [];
+      let direction = DIRECTIONS.right;
+      let turnPending = false;
+      let food = { x: 13, y: 9 };
+      let score = 0;
+      let bestScore = readBestScore();
+      let lastTickTime = performance.now();
+      let spawnTime = performance.now();
+      let foodSpawnTime = performance.now();
+      let eatPulseTime = -Infinity;
+      let deathTime = -Infinity;
+      let touchStart = null;
+      let animationFrameId = 0;
+
+      // Multiplayer state: one fixed PeerJS room, host-authoritative game ticks.
+      const ROOM_HOST_ID = "minimal-snake-fixed-room-v1";
+      const MULTI_TICK_MS = 138;
+      let gameMode = "multiplayer";
+      let peer = null;
+      let connection = null;
+      let guestRetryTimer = null;
+      let guestConnecting = false;
+      let isRoomHost = false;
+      let roomConnected = false;
+      let multiRunning = false;
+      let multiLastTick = 0;
+      let multiDirection = DIRECTIONS.right;
+      let remoteDirection = DIRECTIONS.left;
+      let multiTurnPending = false;
+      let remoteTurnPending = false;
+      let multiSnakes = [[], []];
+      let multiPrevious = [[], []];
+      let multiScores = [0, 0];
+      let multiFood = { x: 13, y: 9 };
+      let multiRespawnAt = [0, 0];
+      let multiAlive = [true, true];
+      let multiEatAt = [-Infinity, -Infinity];
+      let localPlayer = 0;
+      let remotePlayer = 1;
+      let peerReady = false;
+
+      function readBestScore() {
+        try {
+          const stored = Number.parseInt(localStorage.getItem(BEST_SCORE_KEY), 10);
+          return Number.isFinite(stored) && stored > 0 ? stored : 0;
+        } catch {
+          return 0;
+        }
+      }
+
+      function writeBestScore(value) {
+        try {
+          localStorage.setItem(BEST_SCORE_KEY, String(value));
+        } catch {
+          // Storage can be unavailable in private or restricted browsing modes.
+        }
+      }
+
+      function setInterfaceState(nextState) {
+        state = nextState;
+        gameElement.dataset.state = nextState;
+      }
+
+      function isSamePosition(a, b) {
+        return a.x === b.x && a.y === b.y;
+      }
+
+      function isOpposite(a, b) {
+        return a.x + b.x === 0 && a.y + b.y === 0;
+      }
+
+      function getTickDuration() {
+        const profile = SPEED_PROFILES[selectedSpeed];
+        return Math.max(profile.minimum, profile.initial - score * profile.step);
+      }
+
+      function updateCheckedOption(elements, dataKey, selectedValue) {
+        elements.forEach(element => element.setAttribute(
+          "aria-checked", String(element.dataset[dataKey] === selectedValue)
+        ));
+      }
+
+      // --- Fixed-room online multiplayer ----------------------------------
+      function multiInitialSnake(player) {
+        const y = player === 0 ? 7 : 11;
+        const x = player === 0 ? 6 : 12;
+        const dir = player === 0 ? DIRECTIONS.right : DIRECTIONS.left;
+        return Array.from({length: INITIAL_LENGTH}, (_, i) => ({x: x - dir.x * i, y}));
+      }
+
+      function resetMultiPlayer(player, now = performance.now()) {
+        multiSnakes[player] = multiInitialSnake(player);
+        multiPrevious[player] = multiSnakes[player].map(p => ({...p}));
+        multiAlive[player] = true;
+        multiRespawnAt[player] = 0;
+        if (player === localPlayer) {
+          multiDirection = player === 0 ? DIRECTIONS.right : DIRECTIONS.left;
+          multiTurnPending = false;
+        } else {
+          remoteDirection = player === 0 ? DIRECTIONS.right : DIRECTIONS.left;
+          remoteTurnPending = false;
+        }
+      }
+
+      function multiSpawnFood() {
+        const occupied = multiSnakes.flat().filter(Boolean);
+        const free = [];
+        for (let y=0;y<GRID_SIZE;y++) for(let x=0;x<GRID_SIZE;x++) {
+          if (!occupied.some(p=>p.x===x&&p.y===y)) free.push({x,y});
+        }
+        multiFood = free.length ? free[Math.floor(Math.random()*free.length)] : {x:9,y:9};
+      }
+
+      function multiSnapshot() {
+        return {
+          snakes: multiSnakes.map(s=>s.map(p=>({...p}))),
+          scores: [...multiScores], food:{...multiFood}, alive:[...multiAlive],
+          respawnAt:[...multiRespawnAt], running:multiRunning,
+          directions:[multiDirection.name, remoteDirection.name], timestamp:Date.now()
+        };
+      }
+
+      function sendMulti(payload) {
+        if (isRoomHost) {
+          if (connection && connection.open) connection.send({type:"state", state:multiSnapshot()});
+        } else if (connection && connection.open) connection.send(payload);
+      }
+
+      function startMultiplayer() {
+        if (!window.Peer) {
+          networkStatusElement.textContent = "PeerJS could not load. Multiplayer unavailable.";
+          idleHintElement.textContent = "multiplayer connection unavailable";
+          return;
+        }
+        networkStatusElement.textContent = "Connecting to the shared room…";
+        idleHintElement.textContent = "connecting to multiplayer";
+        peer = new Peer(ROOM_HOST_ID, {debug:0});
+        peer.on("open", () => {
+          isRoomHost = true;
+          localPlayer = 0; remotePlayer = 1;
+          resetMultiSession();
+          networkStatusElement.textContent = "Room ready — waiting for Player 2";
+          idleHintElement.textContent = "waiting for the other player";
+        });
+        peer.on("error", err => {
+          if (err.type === "unavailable-id" || err.type === "peer-unavailable") {
+            becomeRoomGuest();
+          } else {
+            networkStatusElement.textContent = "Connection issue: " + err.type;
+          }
+        });
+        peer.on("connection", conn => {
+          if (connection && connection.open) { conn.close(); return; }
+          connection = conn;
+          localPlayer = 0; remotePlayer = 1;
+          setupConnection();
+        });
+      }
+
+      function becomeRoomGuest() {
+        if (peer) { peer.destroy(); peer = null; }
+        if (guestRetryTimer) { clearTimeout(guestRetryTimer); guestRetryTimer = null; }
+        peer = new Peer({debug:0});
+        peer.on("open", () => {
+          localPlayer = 1; remotePlayer = 0;
+          connectAsGuest();
+        });
+        peer.on("error", err => {
+          networkStatusElement.textContent = "Network issue — retrying (" + err.type + ")";
+          scheduleGuestRetry();
+        });
+      }
+
+      function connectAsGuest() {
+        if (!peer || isRoomHost || guestConnecting || (connection && connection.open)) return;
+        guestConnecting = true;
+        networkStatusElement.textContent = "Looking for Player 1…";
+        const c = peer.connect(ROOM_HOST_ID, {reliable:true, serialization:"json"});
+        connection = c;
+        let opened = false;
+        setupConnection(); // subscribe before PeerJS emits "open"
+        c.on("open", () => {
+          opened = true; guestConnecting = false;
+        });
+        c.on("error", () => {
+          guestConnecting = false;
+          if (!opened) scheduleGuestRetry();
+        });
+        c.on("close", () => {
+          guestConnecting = false;
+          if (!roomConnected && !isRoomHost) scheduleGuestRetry();
+        });
+        // PeerJS may not emit an error when the host ID is temporarily absent.
+        setTimeout(() => {
+          if (!opened) {
+            guestConnecting = false;
+            try { c.close(); } catch (_) {}
+            scheduleGuestRetry();
+          }
+        }, 3500);
+      }
+
+      function scheduleGuestRetry() {
+        if (isRoomHost || guestRetryTimer) return;
+        guestRetryTimer = setTimeout(() => {
+          guestRetryTimer = null;
+          if (peer && peer.open) connectAsGuest();
+        }, 1800);
+      }
+
+      function resetMultiSession() {
+        multiScores = [0,0];
+        resetMultiPlayer(0); resetMultiPlayer(1);
+        multiSpawnFood();
+        multiRunning = false;
+        multiLastTick = performance.now();
+        roomConnected = false;
+        peerReady = false;
+        updateMultiScore();
+      }
+
+      function setupConnection() {
+        if (!connection) return;
+        let initialized = false;
+        const onConnectionOpen = () => {
+          if (initialized) return;
+          initialized = true;
+          roomConnected = true;
+          if (isRoomHost) {
+            multiRunning = true;
+            multiLastTick = performance.now();
+            networkStatusElement.textContent = "Player 2 connected — playing";
+            connection.send({type:"welcome", player:1, state:multiSnapshot()});
+          } else {
+            networkStatusElement.textContent = "Connected — playing as Player 2";
+            connection.send({type:"hello"});
+          }
+          idleHintElement.textContent = "multiplayer · use controls to move";
+          gameElement.dataset.state = "running";
+        };
+        connection.on("open", onConnectionOpen);
+        if (connection.open) onConnectionOpen();
+        connection.on("data", data => {
+          if (!data || typeof data !== "object") return;
+          if (isRoomHost && data.type === "hello") {
+            connection.send({type:"welcome", player:1, state:multiSnapshot()});
+          } else if (isRoomHost && data.type === "direction") {
+            const d = DIRECTIONS[data.direction];
+            if (d && !isOpposite(d, remoteDirection) && d.name !== remoteDirection.name && !remoteTurnPending) {
+              remoteDirection = d; remoteTurnPending = true;
+            }
+          } else if (!isRoomHost && (data.type === "state" || data.type === "welcome")) {
+            applyMultiSnapshot(data.state);
+          }
+        });
+        connection.on("close", () => {
+          roomConnected = false;
+          networkStatusElement.textContent = "Opponent disconnected — waiting for reconnection";
+          idleHintElement.textContent = "opponent disconnected";
+        });
+        connection.on("error", () => networkStatusElement.textContent = "Connection interrupted");
+      }
+
+      function applyMultiSnapshot(s) {
+        if (!s) return;
+        multiPrevious = multiSnakes.map(a=>a.map(p=>({...p})));
+        multiSnakes = s.snakes.map(a=>a.map(p=>({...p})));
+        multiScores = [...s.scores]; multiFood={...s.food}; multiAlive=[...s.alive];
+        multiRespawnAt=[...s.respawnAt]; multiRunning=s.running;
+        if (s.directions) {
+          multiDirection = DIRECTIONS[s.directions[localPlayer]] || multiDirection;
+          remoteDirection = DIRECTIONS[s.directions[remotePlayer]] || remoteDirection;
+        }
+        updateMultiScore();
+      }
+
+      function updateMultiScore() {
+        currentScoreElement.textContent = String(multiScores[localPlayer] || 0);
+        bestScoreElement.textContent = String(multiScores[remotePlayer] || 0);
+      }
+
+      function multiRequestDirection(d) {
+        if (!d || !roomConnected) return;
+        if (isRoomHost) {
+          if (!multiTurnPending && !isOpposite(d,multiDirection) && d.name!==multiDirection.name) {
+            multiDirection=d; multiTurnPending=true;
+          }
+        } else {
+          connection.send({type:"direction", direction:d.name});
+        }
+      }
+
+      function multiTick(now) {
+        if (!isRoomHost || !multiRunning || !roomConnected) return;
+        for (let p=0;p<2;p++) {
+          if (!multiAlive[p]) {
+            if (now >= multiRespawnAt[p]) resetMultiPlayer(p,now);
+            continue;
+          }
+          const d=p===localPlayer?multiDirection:remoteDirection;
+          const snake=multiSnakes[p], head=snake[0];
+          const next={x:(head.x+d.x+GRID_SIZE)%GRID_SIZE,y:(head.y+d.y+GRID_SIZE)%GRID_SIZE};
+          const eating=isSamePosition(next,multiFood);
+          const ownBody=eating?snake:snake.slice(0,-1);
+          const selfHit=ownBody.some(q=>isSamePosition(q,next));
+          const other=multiSnakes[1-p];
+          const otherHit=multiAlive[1-p] && other.some(q=>isSamePosition(q,next));
+          if (selfHit || otherHit) {
+            multiAlive[p]=false; multiRespawnAt[p]=now+1100;
+            continue;
+          }
+          multiPrevious[p]=snake.map(q=>({...q}));
+          snake.unshift(next);
+          if (eating) {
+            multiScores[p]++;
+            multiSpawnFood();
+          } else snake.pop();
+          if(p===0) multiTurnPending=false; else remoteTurnPending=false;
+        }
+        updateMultiScore();
+        sendMulti({type:"state"});
+      }
+
+      function stopMultiplayer() {
+        roomConnected=false; multiRunning=false;
+        if (connection) { connection.close(); connection=null; }
+        if (peer) { peer.destroy(); peer=null; }
+        isRoomHost=false;
+      }
+
+      function drawMultiSnake(player, now, interpolation) {
+        const snake=multiSnakes[player]||[];
+        const prev=multiPrevious[player]||[];
+        const bodyRadius=Math.max(5.4,gridGap*0.315);
+        const headRadius=Math.max(6.5,gridGap*0.405);
+        const direction=player===localPlayer?multiDirection:remoteDirection;
+        const alpha=multiAlive[player]?1:0.22;
+        for(let i=snake.length-1;i>=0;i--){
+          const current=snake[i], old=prev[i]||current;
+          const point=gridToCanvas(interpolatePosition(old,current,interpolation));
+          drawCircle(point.x,point.y,i===0?headRadius:bodyRadius,
+            player===localPlayer?"rgb(246, 246, 246)":"rgb(178, 178, 178)",alpha);
+          if(i===0) drawMultiEyes(point,headRadius,direction);
+        }
+      }
+
+      function drawMultiEyes(headPoint, radius, direction) {
+        const side={x:-direction.y,y:direction.x}, f=radius*.31, s=radius*.3, er=Math.max(1,radius*.095);
+        for(const sign of [1,-1]) drawCircle(
+          headPoint.x+direction.x*f+side.x*s*sign,
+          headPoint.y+direction.y*f+side.y*s*sign,er,"rgb(8,8,8)",.95
+        );
+      }
+
+      // --- Setup, reset, and scoring ---------------------------------------
+      function resetGame(startImmediately = false, startingDirection = DIRECTIONS.right) {
+        const centerY = Math.floor(GRID_SIZE / 2);
+        const headX = Math.floor(GRID_SIZE * 0.42);
+
+        direction = startingDirection;
+        turnPending = startImmediately;
+        score = 0;
+        tickDuration = getTickDuration();
+        deathTime = -Infinity;
+        eatPulseTime = -Infinity;
+
+        // Build the initial body behind the chosen direction so every restart
+        // can safely begin with a directional key or swipe.
+        snake = Array.from({ length: INITIAL_LENGTH }, (_, index) => ({
+          x: headX - startingDirection.x * index,
+          y: centerY - startingDirection.y * index
+        }));
+        previousSnake = snake.map(part => ({ ...part }));
+
+        spawnFood();
+        updateScoreDisplay(false);
+        finalScoreElement.textContent = "0";
+        spawnTime = performance.now();
+        lastTickTime = spawnTime;
+        setInterfaceState(startImmediately ? "running" : "idle");
+
+        if (startImmediately) {
+          statusElement.textContent = "New game started.";
+        }
+      }
+
+      function startGame() {
+        if (state !== "idle") return;
+        previousSnake = snake.map(part => ({ ...part }));
+        lastTickTime = performance.now();
+        setInterfaceState("running");
+        statusElement.textContent = "Game started.";
+      }
+
+      function updateScoreDisplay(animate = true) {
+        currentScoreElement.textContent = String(score);
+        bestScoreElement.textContent = String(bestScore);
+
+        if (animate && !reduceMotionQuery.matches && currentScoreElement.animate) {
+          currentScoreElement.animate(
+            [
+              { transform: "scale(1)" },
+              { transform: "scale(1.1)", offset: 0.45 },
+              { transform: "scale(1)" }
+            ],
+            { duration: 220, easing: "ease-out" }
+          );
+        }
+      }
+
+      function spawnFood() {
+        const freePositions = [];
+
+        for (let y = 0; y < GRID_SIZE; y += 1) {
+          for (let x = 0; x < GRID_SIZE; x += 1) {
+            if (!snake.some(part => part.x === x && part.y === y)) {
+              freePositions.push({ x, y });
+            }
+          }
+        }
+
+        if (freePositions.length === 0) {
+          finishGame(true);
+          return;
+        }
+
+        food = freePositions[Math.floor(Math.random() * freePositions.length)];
+        foodSpawnTime = performance.now();
+      }
+
+      function finishGame(completed = false) {
+        if (state === "over") return;
+        setInterfaceState("over");
+        deathTime = performance.now();
+        finalScoreElement.textContent = String(score);
+        statusElement.textContent = completed
+          ? `Board completed. Final score ${score}.`
+          : `Game over. Final score ${score}.`;
+      }
+
+      // --- Input handling ---------------------------------------------------
+      function requestDirection(nextDirection) {
+        if (!nextDirection) return;
+
+        if (state === "idle") {
+          if (isOpposite(nextDirection, direction)) return;
+          direction = nextDirection;
+          turnPending = true;
+          startGame();
+          return;
+        }
+
+        if (state !== "running") return;
+
+        // Accept one safe turn per grid step immediately. This updates the
+        // head direction on the very next frame without building a laggy queue.
+        if (
+          !turnPending &&
+          !isOpposite(nextDirection, direction) &&
+          nextDirection.name !== direction.name
+        ) {
+          direction = nextDirection;
+          turnPending = true;
+        }
+      }
+
+      function restartFromInput(nextDirection = null) {
+        if (state !== "over" || performance.now() - deathTime < RESTART_LOCK_MS) return;
+        const safeDirection = nextDirection || DIRECTIONS.right;
+        resetGame(true, safeDirection);
+      }
+
+      window.addEventListener("keydown", event => {
+        const nextDirection = KEY_DIRECTIONS[event.key];
+
+        if (nextDirection) {
+          event.preventDefault();
+
+          if (gameMode === "multiplayer") {
+            if (!event.repeat) multiRequestDirection(nextDirection);
+          } else if (state === "over") {
+            if (!event.repeat) restartFromInput(nextDirection);
+          } else {
+            requestDirection(nextDirection);
+          }
+          return;
+        }
+
+        if (
+          state === "over" &&
+          !event.metaKey &&
+          !event.ctrlKey &&
+          !event.altKey &&
+          !["Tab", "Shift", "Control", "Alt", "Meta"].includes(event.key)
+        ) {
+          event.preventDefault();
+          if (!event.repeat) restartFromInput();
+        }
+      }, { passive: false });
+
+      document.addEventListener("pointerdown", event => {
+        if (event.pointerType === "mouse" && event.button !== 0) return;
+        if (state === "over" && performance.now() - deathTime < RESTART_LOCK_MS) {
+          event.preventDefault();
+          touchStart = null;
+          return;
+        }
+        event.preventDefault();
+        const captureTarget = event.target instanceof Element ? event.target : boardElement;
+        captureTarget.setPointerCapture?.(event.pointerId);
+        touchStart = {
+          x: event.clientX,
+          y: event.clientY,
+          pointerId: event.pointerId,
+          captureTarget,
+          handled: false
+        };
+      }, { passive: false });
+
+      document.addEventListener("pointermove", event => {
+        if (touchStart && event.pointerId === touchStart.pointerId) {
+          event.preventDefault();
+
+          if (!touchStart.handled && state !== "over") {
+            const deltaX = event.clientX - touchStart.x;
+            const deltaY = event.clientY - touchStart.y;
+            const swipeThreshold = Math.max(14, canvasSize * 0.03);
+
+            if (Math.hypot(deltaX, deltaY) >= swipeThreshold) {
+              touchStart.handled = true;
+              (gameMode === "multiplayer" ? multiRequestDirection : requestDirection)(
+                Math.abs(deltaX) > Math.abs(deltaY)
+                  ? (deltaX > 0 ? DIRECTIONS.right : DIRECTIONS.left)
+                  : (deltaY > 0 ? DIRECTIONS.down : DIRECTIONS.up)
+              );
+            }
+          }
+        }
+      }, { passive: false });
+
+      document.addEventListener("pointerup", event => {
+        if (!touchStart || event.pointerId !== touchStart.pointerId) return;
+        event.preventDefault();
+
+        const deltaX = event.clientX - touchStart.x;
+        const deltaY = event.clientY - touchStart.y;
+        const swipeDistance = Math.hypot(deltaX, deltaY);
+        const swipeThreshold = Math.max(14, canvasSize * 0.03);
+        const gestureWasHandled = touchStart.handled;
+        touchStart = null;
+
+        if (state === "over") {
+          restartFromInput();
+          return;
+        }
+
+        if (gestureWasHandled || swipeDistance < swipeThreshold) return;
+
+        if (Math.abs(deltaX) > Math.abs(deltaY)) {
+          (gameMode === "multiplayer" ? multiRequestDirection : requestDirection)(deltaX > 0 ? DIRECTIONS.right : DIRECTIONS.left);
+        } else {
+          (gameMode === "multiplayer" ? multiRequestDirection : requestDirection)(deltaY > 0 ? DIRECTIONS.down : DIRECTIONS.up);
+        }
+      }, { passive: false });
+
+      document.addEventListener("pointercancel", () => {
+        touchStart = null;
+      });
+
+      // Extra protection for iOS overscroll/rubber-banding outside controls.
+      document.addEventListener("touchmove", event => {
+        if (!isMenuInteraction(event)) event.preventDefault();
+      }, { passive: false });
+
+      document.addEventListener("wheel", event => {
+        if (!isMenuInteraction(event)) event.preventDefault();
+      }, { passive: false });
+
+
+      speedOptionElements.forEach(element => {
+        element.addEventListener("click", () => setSpeed(element.dataset.speed));
+      });
+
+      modeOptionElements.forEach(element => {
+        element.addEventListener("click", () => setMode(element.dataset.mode));
+      });
+      gameOptionElements.forEach(element => {
+        element.addEventListener("click", () => setGameMode(element.dataset.game));
+      });
+
+      document.addEventListener("click", event => {
+        if (!settingsElement.contains(event.target)) closeSettingsMenu();
+      });
+
+      // --- Logic ticks ------------------------------------------------------
+      function update() {
+        if (state !== "running") return;
+
+        previousSnake = snake.map(part => ({ ...part }));
+
+        const head = snake[0];
+        let nextHead = {
+          x: head.x + direction.x,
+          y: head.y + direction.y
+        };
+
+        const outsideBoard =
+          nextHead.x < 0 ||
+          nextHead.x >= GRID_SIZE ||
+          nextHead.y < 0 ||
+          nextHead.y >= GRID_SIZE;
+
+        if (outsideBoard && selectedMode === "bordered") {
+          previousSnake = snake.map(part => ({ ...part }));
+          finishGame(false);
+          return;
+        }
+
+        if (selectedMode === "standard") {
+          nextHead = {
+            x: (nextHead.x + GRID_SIZE) % GRID_SIZE,
+            y: (nextHead.y + GRID_SIZE) % GRID_SIZE
+          };
+        }
+
+        const willEat = isSamePosition(nextHead, food);
+        const collisionBody = willEat ? snake : snake.slice(0, -1);
+        const hitBody = collisionBody.some(part => isSamePosition(part, nextHead));
+
+        if (hitBody) {
+          previousSnake = snake.map(part => ({ ...part }));
+          finishGame(false);
+          return;
+        }
+
+        snake.unshift(nextHead);
+
+        if (willEat) {
+          score += 1;
+          eatPulseTime = performance.now();
+          tickDuration = getTickDuration();
+
+          if (score > bestScore) {
+            bestScore = score;
+            writeBestScore(bestScore);
+          }
+
+          updateScoreDisplay(true);
+          spawnFood();
+        } else {
+          snake.pop();
+        }
+
+        // A newly grown tail begins at the former tail position, so it appears
+        // naturally instead of popping in from elsewhere.
+        while (previousSnake.length < snake.length) {
+          previousSnake.push({ ...previousSnake[previousSnake.length - 1] });
+        }
+
+        turnPending = false;
+      }
+
+      // --- Responsive, high-DPI canvas -------------------------------------
+      function resizeCanvas() {
+        const rect = boardElement.getBoundingClientRect();
+        const nextSize = Math.max(1, Math.min(rect.width, rect.height));
+        const nextScale = Math.min(window.devicePixelRatio || 1, 3);
+
+        canvasSize = nextSize;
+        deviceScale = nextScale;
+        canvas.width = Math.round(canvasSize * deviceScale);
+        canvas.height = Math.round(canvasSize * deviceScale);
+        canvas.style.width = `${canvasSize}px`;
+        canvas.style.height = `${canvasSize}px`;
+        context.setTransform(deviceScale, 0, 0, deviceScale, 0, 0);
+
+        // One empty grid interval around the outermost markers provides room
+        // for full circles while keeping every node centered on a marker.
+        gridGap = canvasSize / (GRID_SIZE + 1);
+        gridOrigin = gridGap;
+      }
+
+      const resizeObserver = new ResizeObserver(resizeCanvas);
+      resizeObserver.observe(boardElement);
+      window.addEventListener("resize", resizeCanvas);
+      window.addEventListener("orientationchange", resizeCanvas);
+
+      // --- Canvas rendering -------------------------------------------------
+      function gridToCanvas(position) {
+        return {
+          x: gridOrigin + position.x * gridGap,
+          y: gridOrigin + position.y * gridGap
+        };
+      }
+
+      function interpolatePosition(from, to, progress) {
+        return {
+          x: from.x + (to.x - from.x) * progress,
+          y: from.y + (to.y - from.y) * progress
+        };
+      }
+
+      // A wrapped node is drawn twice while crossing an edge: once as it
+      // leaves the board and once as it enters on the opposite side. This
+      // avoids a visible interpolation sweep across the entire playing field.
+      function getInterpolatedPositions(from, to, progress) {
+        const deltaX = to.x - from.x;
+        const deltaY = to.y - from.y;
+
+        if (Math.abs(deltaX) <= 1 && Math.abs(deltaY) <= 1) {
+          return [interpolatePosition(from, to, progress)];
+        }
+
+        const wrappedStep = {
+          x: Math.abs(deltaX) > 1 ? (from.x === GRID_SIZE - 1 ? 1 : -1) : 0,
+          y: Math.abs(deltaY) > 1 ? (from.y === GRID_SIZE - 1 ? 1 : -1) : 0
+        };
+
+        return [
+          interpolatePosition(
+            from,
+            { x: from.x + wrappedStep.x, y: from.y + wrappedStep.y },
+            progress
+          ),
+          interpolatePosition(
+            { x: to.x - wrappedStep.x, y: to.y - wrappedStep.y },
+            to,
+            progress
+          )
+        ];
+      }
+
+      function drawCircle(x, y, radius, color, alpha = 1) {
+        context.globalAlpha = Math.min(1, Math.max(0, alpha));
+        context.fillStyle = color;
+        context.beginPath();
+        context.arc(x, y, Math.max(0.1, radius), 0, Math.PI * 2);
+        context.fill();
+        context.globalAlpha = 1;
+      }
+
+      function drawGrid() {
+        const dotRadius = Math.max(1, Math.min(1.75, gridGap * 0.052));
+        context.fillStyle = "rgba(255, 255, 255, 0.155)";
+
+        for (let y = 0; y < GRID_SIZE; y += 1) {
+          for (let x = 0; x < GRID_SIZE; x += 1) {
+            const point = gridToCanvas({ x, y });
+            context.beginPath();
+            context.arc(point.x, point.y, dotRadius, 0, Math.PI * 2);
+            context.fill();
+          }
+        }
+      }
+
+      function drawFood(now, foodPosition = food) {
+        const point = gridToCanvas(foodPosition);
+        const baseRadius = Math.max(5.2, gridGap * 0.29);
+        const age = Math.max(0, now - foodSpawnTime);
+        const appearScale = reduceMotionQuery.matches
+          ? 1
+          : Math.min(1, 0.72 + (age / 260) * 0.28);
+        const breathe = reduceMotionQuery.matches
+          ? 1
+          : 0.995 + Math.sin(now / 270) * 0.025;
+
+        drawCircle(
+          point.x,
+          point.y,
+          baseRadius * appearScale * breathe,
+          "rgb(191, 191, 193)",
+          0.9
+        );
+      }
+
+      function drawSnake(now, interpolation) {
+        const bodyRadius = Math.max(5.4, gridGap * 0.315);
+        const headRadius = Math.max(6.5, gridGap * 0.405);
+        const spawnAge = now - spawnTime;
+        const entryProgress = reduceMotionQuery.matches
+          ? 1
+          : Math.min(1, Math.max(0, spawnAge / 300));
+        const entryScale = 0.82 + entryProgress * 0.18;
+
+        const deathAge = now - deathTime;
+        const deathBrightness = state === "over" && deathAge < 230
+          ? 1 + Math.sin((deathAge / 230) * Math.PI) * 0.09
+          : 1;
+
+        for (let index = snake.length - 1; index >= 0; index -= 1) {
+          const current = snake[index];
+          const previous = previousSnake[index] || previousSnake[previousSnake.length - 1] || current;
+          const points = getInterpolatedPositions(previous, current, interpolation).map(gridToCanvas);
+
+          if (index === 0) {
+            const pulseAge = now - eatPulseTime;
+            const pulse = !reduceMotionQuery.matches && pulseAge >= 0 && pulseAge < 240
+              ? 1 + Math.sin((pulseAge / 240) * Math.PI) * 0.115
+              : 1;
+
+            points.forEach(point => {
+              drawCircle(
+                point.x,
+                point.y,
+                headRadius * entryScale * pulse,
+                "rgb(246, 246, 246)",
+                Math.min(1, 0.2 + entryProgress * 0.8) * deathBrightness
+              );
+              drawEyes(point, headRadius * entryScale * pulse);
+            });
+          } else {
+            const tailProgress = index / Math.max(1, snake.length - 1);
+            const brightness = Math.round(239 - tailProgress * 27);
+            const alpha = (0.98 - tailProgress * 0.11) * Math.min(1, 0.2 + entryProgress * 0.8);
+
+            points.forEach(point => {
+              drawCircle(
+                point.x,
+                point.y,
+                bodyRadius * entryScale,
+                `rgb(${brightness}, ${brightness}, ${brightness})`,
+                Math.min(1, alpha * deathBrightness)
+              );
+            });
+          }
+        }
+      }
+
+      function drawEyes(headPoint, headRadius) {
+        const forward = direction;
+        const side = { x: -direction.y, y: direction.x };
+        const forwardOffset = headRadius * 0.31;
+        const sideOffset = headRadius * 0.3;
+        const eyeRadius = Math.max(1, headRadius * 0.095);
+
+        const eyeOne = {
+          x: headPoint.x + forward.x * forwardOffset + side.x * sideOffset,
+          y: headPoint.y + forward.y * forwardOffset + side.y * sideOffset
+        };
+        const eyeTwo = {
+          x: headPoint.x + forward.x * forwardOffset - side.x * sideOffset,
+          y: headPoint.y + forward.y * forwardOffset - side.y * sideOffset
+        };
+
+        drawCircle(eyeOne.x, eyeOne.y, eyeRadius, "rgb(8, 8, 8)", 0.95);
+        drawCircle(eyeTwo.x, eyeTwo.y, eyeRadius, "rgb(8, 8, 8)", 0.95);
+      }
+
+      function render(now) {
+        if (!canvasSize) resizeCanvas();
+
+        if (gameMode === "multiplayer" && isRoomHost && roomConnected && multiRunning) {
+          if (now - multiLastTick >= MULTI_TICK_MS) {
+            multiLastTick = now;
+            multiTick(now);
+          }
+        } else if (gameMode === "single" && state === "running") {
+          let elapsed = now - lastTickTime;
+          let safetyCounter = 0;
+
+          while (elapsed >= tickDuration && state === "running" && safetyCounter < 5) {
+            const completedTickDuration = tickDuration;
+            update();
+            lastTickTime += completedTickDuration;
+            elapsed = now - lastTickTime;
+            safetyCounter += 1;
+          }
+        }
+
+        const interpolation = state === "running"
+          ? Math.min(1, Math.max(0, (now - lastTickTime) / tickDuration))
+          : 1;
+
+        context.setTransform(deviceScale, 0, 0, deviceScale, 0, 0);
+        context.globalAlpha = 1;
+        context.fillStyle = "#050505";
+        context.fillRect(0, 0, canvasSize, canvasSize);
+
+        drawGrid();
+        if (gameMode === "multiplayer") {
+          const mp = Math.min(1, Math.max(0, (now - multiLastTick) / MULTI_TICK_MS));
+          drawFood(now, multiFood);
+          drawMultiSnake(0, now, mp);
+          drawMultiSnake(1, now, mp);
+        } else {
+          drawFood(now);
+          drawSnake(now, interpolation);
+        }
+
+        animationFrameId = requestAnimationFrame(render);
+      }
+
+      // Keep logic time stable after tab changes instead of trying to catch up.
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden && state === "running") {
+          previousSnake = snake.map(part => ({ ...part }));
+          lastTickTime = performance.now();
+        }
+      });
+
+      function updateInputHints() {
+        const isTouch = coarsePointerQuery.matches || navigator.maxTouchPoints > 0;
+        idleHintElement.textContent = isTouch ? "swipe to start" : "connecting to multiplayer";
+        restartHintElement.textContent = isTouch ? "Tap to restart" : "Press any key to restart";
+      }
+
+      coarsePointerQuery.addEventListener?.("change", updateInputHints);
+      updateInputHints();
+      bestScoreElement.textContent = String(bestScore);
+      resetGame(false);
+      gameMode = "multiplayer";
+      currentScoreElement.parentElement.querySelector(".score-label").textContent = "YOU";
+      bestScoreElement.parentElement.querySelector(".score-label").textContent = "OPPONENT";
+      startMultiplayer();
+      cancelAnimationFrame(animationFrameId);
+      animationFrameId = requestAnimationFrame(render);
+    })();
+  </script>
+</body>
+</html>
