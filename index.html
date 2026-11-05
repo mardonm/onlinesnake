@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>Snake — Multiplayer</title>
+<style>
+:root{color-scheme:dark;--bg:#090a0a;--fg:#e9eee9;--muted:#7d8780;--line:#252b27;--green:#b8f28b;--blue:#8bd8f2}
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--fg);font:14px ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;touch-action:none;overscroll-behavior:none}
+body{display:flex;align-items:center;justify-content:center;padding:16px}.app{width:min(94vw,660px);display:flex;flex-direction:column;gap:14px}.top{display:flex;align-items:center;justify-content:space-between;gap:12px}.brand{font-size:12px;letter-spacing:.18em;color:var(--muted)}select,button{font:inherit;color:var(--fg);background:#111512;border:1px solid var(--line);border-radius:7px;padding:9px 11px;outline:none}select{max-width:180px}.scores{display:grid;grid-template-columns:1fr 1fr;gap:8px}.score{border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:#0d100e}.score small{display:block;color:var(--muted);font-size:10px;letter-spacing:.1em;margin-bottom:5px}.score strong{font-size:20px;font-weight:500}.score.p1 strong{color:var(--green)}.score.p2 strong{color:var(--blue)}.board-wrap{position:relative;width:100%;aspect-ratio:1;border:1px solid #303832;border-radius:10px;overflow:hidden;background:#0b0d0b;box-shadow:0 18px 60px #0008}.board-wrap canvas{width:100%;height:100%;display:block}.overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#080a09b8;text-align:center;padding:24px;pointer-events:none}.overlay.hidden{display:none}.overlay .message{max-width:300px}.overlay h2{font-size:18px;font-weight:500;margin:0 0 9px}.overlay p{color:var(--muted);line-height:1.6;margin:0}.bottom{display:flex;align-items:center;justify-content:space-between;gap:10px;color:var(--muted);font-size:11px}.status{display:flex;align-items:center;gap:7px}.dot{width:7px;height:7px;border-radius:50%;background:#e6b86a}.dot.online{background:#8be0a0}.dot.wait{background:#e6b86a}.hint{text-align:right}.restart{pointer-events:auto;margin-top:14px}.foot{color:#515b53;font-size:10px;text-align:center;letter-spacing:.04em}
+@media(max-width:430px){body{padding:12px}.app{gap:10px}.score{padding:8px 10px}.score strong{font-size:18px}.bottom{font-size:10px}}
+</style></head><body><main class="app">
+<header class="top"><div class="brand">S N A K E&nbsp; / &nbsp;19 × 19</div><select id="mode" aria-label="Game mode"><option value="multi" selected>Multiplayer</option><option value="single">Single game</option></select></header>
+<section class="scores"><div class="score p1"><small id="label1">PLAYER 1 · YOU</small><strong id="score1">0</strong></div><div class="score p2"><small id="label2">PLAYER 2 · WAITING</small><strong id="score2">0</strong></div></section>
+<div class="board-wrap" id="boardWrap"><canvas id="game" width="760" height="760"></canvas><div class="overlay" id="overlay"><div class="message"><h2 id="ovTitle">Connecting to the room…</h2><p id="ovText">Opening the fixed online room. Keep this page open.</p></div></div></div>
+<footer class="bottom"><div class="status"><span class="dot wait" id="dot"></span><span id="status">Connecting…</span></div><div class="hint">WASD / ARROWS · SWIPE</div></footer><div class="foot">ONE ROOM · SHARED BOARD · LIVE PLAY</div>
+</main><script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script><script>
+(()=>{
+const N=19, CELL=40, canvas=document.getElementById('game'),ctx=canvas.getContext('2d'),modeEl=document.getElementById('mode'),overlay=document.getElementById('overlay'),ovTitle=document.getElementById('ovTitle'),ovText=document.getElementById('ovText'),statusEl=document.getElementById('status'),dot=document.getElementById('dot'),s1=document.getElementById('score1'),s2=document.getElementById('score2'),l1=document.getElementById('label1'),l2=document.getElementById('label2');
+const ROOM='snake-19x19-fixed-room-v1';let role=0,peer,conn,connected=false,isHost=false,roomState=null,localMode='multi',lastDraw=0,raf=0,localSingle=null,respawnTimers={},lastDir={1:'R',2:'L'};
+const dirs={U:[0,-1],D:[0,1],L:[-1,0],R:[1,0]},opposite={U:'D',D:'U',L:'R',R:'L'};
+function snake(x,y,d){return {body:Array.from({length:5},(_,i)=>[x-dirs[d][0]*i,y-dirs[d][1]*i]),dir:d,next:d,score:0,alive:true,respawnAt:0}}
+function randFood(snakes){let free=[];for(let y=0;y<N;y++)for(let x=0;x<N;x++)if(!snakes.some(s=>s.body.some(b=>b[0]===x&&b[1]===y)))free.push([x,y]);return free.length?free[Math.floor(Math.random()*free.length)]:[9,9]}
+function newState(){let a=snake(4,9,'R'),b=snake(14,9,'L');return {food:[9,4],players:{1:a,2:b},tick:0}}
+function freshSnake(id){return id===1?snake(4,9,'R'):snake(14,9,'L')}
+function setStatus(t,online=false){statusEl.textContent=t;dot.className='dot '+(online?'online':'wait')}
+function show(title,text){overlay.classList.remove('hidden');ovTitle.textContent=title;ovText.textContent=text}
+function hide(){overlay.classList.add('hidden')}
+function send(msg){if(conn&&conn.open)conn.send(msg)}
+function broadcast(){if(conn&&conn.open)conn.send({type:'state',state:roomState})}
+function startPeer(){if(!window.Peer){show('Connection unavailable','PeerJS could not load. Check your internet connection and refresh.');setStatus('Offline');return}
+  peer=new Peer(ROOM,{debug:0});
+  peer.on('open',()=>{isHost=true;role=1;roomState=newState();setStatus('Room open · you are Player 1',true);show('Waiting for Player 2','Share this GitHub Pages URL. The second player joins this fixed room.');startLoop()});
+  peer.on('connection',c=>{if(conn&&conn.open){c.on('open',()=>c.send({type:'full'}));return}acceptConnection(c)});
+  peer.on('error',err=>{if(err.type==='unavailable-id'){peer.destroy();joinRoom()}else{console.warn(err);setStatus('Connection issue');show('Connection issue','Could not establish the room. Refresh the page to retry.')}});
+}
+function joinRoom(){isHost=false;peer=new Peer();peer.on('open',()=>{role=2;setStatus('Joining room…');conn=peer.connect(ROOM,{reliable:true});conn.on('open',()=>{connected=true;setStatus('Connected · Player 2',true);send({type:'join'});hide();startLoop()});conn.on('data',handleData);conn.on('close',disconnected)});peer.on('error',e=>{console.warn(e);setStatus('Waiting for room');show('Room not found yet','Player 1 must open the game first. Refresh after they have loaded it.')})}
+function acceptConnection(c){conn=c;conn.on('open',()=>{connected=true;setStatus('Connected · Player 1',true);hide();c.send({type:'state',state:roomState});startLoop()});conn.on('data',handleData);conn.on('close',disconnected)}
+function disconnected(){connected=false;conn=null;setStatus('Opponent disconnected');show('Opponent disconnected','The shared game paused. Refresh both pages to start a new room.');}
+function handleData(msg){if(!msg)return;if(isHost){if(msg.type==='input'){changeDir(2,msg.dir)}else if(msg.type==='join'){broadcast()}}else{if(msg.type==='state'){roomState=msg.state;hide();renderScores()}else if(msg.type==='full'){setStatus('Room is full')}}}
+function changeDir(id,d){let s=roomState?.players[id];if(!s||!s.alive||!dirs[d]||opposite[s.dir]===d)return;s.next=d}
+function input(d){if(localMode==='single'){if(localSingle)changeDir(1,d);return}if(role===1&&isHost&&roomState)changeDir(1,d);else if(role===2)send({type:'input',dir:d})}
+function die(id){let s=roomState.players[id];s.alive=false;s.body=[];s.respawnAt=Date.now()+1000;s.score=s.score;}
+function step(){if(!roomState)return;roomState.tick++;
+ for(let id of [1,2]){let s=roomState.players[id];if(!s.alive){if(Date.now()>=s.respawnAt){let ns=freshSnake(id);ns.score=s.score;roomState.players[id]=ns}continue}
+  s.dir=s.next;let [dx,dy]=dirs[s.dir],head=[s.body[0][0]+dx,s.body[0][1]+dy];
+  head[0]=(head[0]+N)%N;head[1]=(head[1]+N)%N;
+  let ate=head[0]===roomState.food[0]&&head[1]===roomState.food[1];
+  let own=s.body.slice(0,ate?s.body.length:s.body.length-1),other=roomState.players[id===1?2:1];
+  if(own.some(p=>p[0]===head[0]&&p[1]===head[1])||(other.alive&&other.body.some(p=>p[0]===head[0]&&p[1]===head[1]))){die(id);continue}
+  s.body.unshift(head);if(!ate)s.body.pop();else{s.score++;roomState.food=randFood([s,other])}
+ }
+ broadcast();renderScores();
+}
+let lastTick=0;function startLoop(){if(raf)return;lastTick=performance.now();function loop(t){raf=requestAnimationFrame(loop);if(localMode==='single'){if(t-lastTick>=135){lastTick=t;singleStep()}draw(localSingle, null, localSingle?.food);return}
+ if(isHost&&connected&&t-lastTick>=135){lastTick=t;step()}draw(roomState?.players[1],roomState?.players[2],roomState?.food)}raf=requestAnimationFrame(loop)}
+function singleStart(){localSingle={...snake(9,9,'R'),food:[13,9]}}
+function singleStep(){if(!localSingle||!localSingle.alive){if(localSingle&&Date.now()>=localSingle.respawnAt){let s=snake(9,9,'R');s.score=localSingle.score;localSingle=s}return}let s=localSingle;s.dir=s.next;let [dx,dy]=dirs[s.dir],h=[s.body[0][0]+dx,s.body[0][1]+dy],ate=h[0]===s.food[0]&&h[1]===s.food[1];h[0]=(h[0]+N)%N;h[1]=(h[1]+N)%N;if(s.body.slice(0,ate?s.body.length:s.body.length-1).some(p=>p[0]===h[0]&&p[1]===h[1])){s.alive=false;s.body=[];s.respawnAt=Date.now()+1000;return}s.body.unshift(h);if(!ate)s.body.pop();else{s.score++;s.food=randFood([s])}s1.textContent=s.score;l1.textContent='YOU · SINGLE';s2.textContent='—';l2.textContent='PLAYER 2 · OFF'}
+function renderScores(){if(!roomState)return;s1.textContent=roomState.players[1].score;s2.textContent=roomState.players[2].score;l1.textContent=role===1?'PLAYER 1 · YOU':'PLAYER 1';l2.textContent=role===2?'PLAYER 2 · YOU':connected?'PLAYER 2':'PLAYER 2 · WAITING'}
+function draw(a,b,food){ctx.clearRect(0,0,760,760);ctx.fillStyle='#0b0d0b';ctx.fillRect(0,0,760,760);ctx.strokeStyle='#202520';ctx.lineWidth=1;for(let x=20;x<760;x+=40)for(let y=20;y<760;y+=40){ctx.beginPath();ctx.arc(x,y,1.2,0,Math.PI*2);ctx.fillStyle='#252c26';ctx.fill()}
+ if(food){ctx.fillStyle='#f1c879';ctx.beginPath();ctx.arc(food[0]*40+20,food[1]*40+20,7,0,Math.PI*2);ctx.fill();ctx.strokeStyle='#f1c87955';ctx.beginPath();ctx.arc(food[0]*40+20,food[1]*40+20,12,0,Math.PI*2);ctx.stroke()}
+ function paint(s,color){if(!s||!s.alive)return;s.body.forEach((p,i)=>{ctx.fillStyle=i===0?color:'#'+(color=== '#b8f28b'?'7da85f':'5d9fb2');let r=i===0?12:9;ctx.beginPath();ctx.roundRect(p[0]*40+20-r,p[1]*40+20-r,r*2,r*2,4);ctx.fill()})}paint(a,'#b8f28b');paint(b,'#8bd8f2');}
+modeEl.addEventListener('change',()=>{localMode=modeEl.value;if(localMode==='single'){singleStart();show('Single game','Use WASD, arrow keys or swipe.');}else{hide();if(!roomState&&isHost)roomState=newState();renderScores()}});
+window.addEventListener('keydown',e=>{let d={ArrowUp:'U',w:'U',W:'U',ArrowDown:'D',s:'D',S:'D',ArrowLeft:'L',a:'L',A:'L',ArrowRight:'R',d:'R',D:'R'}[e.key];if(d){e.preventDefault();input(d)}if(e.key===' '){e.preventDefault();if(localMode==='single')singleStart()}});
+let touch=null;canvas.addEventListener('touchstart',e=>{let t=e.changedTouches[0];touch=[t.clientX,t.clientY];},{passive:false});canvas.addEventListener('touchend',e=>{if(!touch)return;let t=e.changedTouches[0],dx=t.clientX-touch[0],dy=t.clientY-touch[1];if(Math.max(Math.abs(dx),Math.abs(dy))>18)input(Math.abs(dx)>Math.abs(dy)?(dx>0?'R':'L'):(dy>0?'D':'U'));touch=null},{passive:false});
+// PeerJS gives the fixed room a lightweight WebRTC signaling path; the host owns simulation.
+startPeer();
+})();
+</script></body></html>
